@@ -60,6 +60,9 @@ const EMPTY_VOTES: VoteStatus = {
   rematch_votes: 0,
   reset_votes: 0,
   free_hint_votes: 0,
+  ready_start_votes: 0,
+  total_active: 1,
+  all_ready: false,
   needed: 1
 };
 
@@ -230,6 +233,7 @@ export default function HangmanApp() {
   const [events, setEvents] = useState<GameEventRow[]>([]);
   const [quickChats, setQuickChats] = useState<QuickChatRow[]>([]);
   const [votes, setVotes] = useState<VoteStatus>(EMPTY_VOTES);
+  const [readyPlayerIds, setReadyPlayerIds] = useState<string[]>([]);
   const [roundOutcomeFx, setRoundOutcomeFx] = useState<RoundOutcomeFx>(null);
   const [tournamentRounds, setTournamentRounds] = useState<Array<{ id: string; winner_player_id: string | null }>>([]);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
@@ -259,6 +263,7 @@ export default function HangmanApp() {
   const [isVotingRematch, setIsVotingRematch] = useState(false);
   const [isVotingReset, setIsVotingReset] = useState(false);
   const [isVotingHint, setIsVotingHint] = useState(false);
+  const [isSettingReady, setIsSettingReady] = useState(false);
   const [isSkippingTurn, setIsSkippingTurn] = useState(false);
   const [isActivatingDouble, setIsActivatingDouble] = useState(false);
   const [isTogglingBlockVowels, setIsTogglingBlockVowels] = useState(false);
@@ -478,6 +483,26 @@ export default function HangmanApp() {
     [supabase]
   );
 
+  const loadReadyPlayers = useCallback(
+    async (roomId: string) => {
+      if (!supabase) return;
+      const { data, error } = await supabase
+        .from("room_votes")
+        .select("player_id")
+        .eq("room_id", roomId)
+        .eq("vote_type", "ready_start");
+
+      if (error) {
+        setActionError(error.message);
+        return;
+      }
+
+      const readyIds = (data ?? []).map((row) => String((row as { player_id: string }).player_id));
+      setReadyPlayerIds(readyIds);
+    },
+    [supabase]
+  );
+
   const loadLeaderboards = useCallback(async () => {
     if (!supabase) return;
     const { data, error } = await supabase.rpc("get_leaderboards", { p_limit: 10 });
@@ -617,6 +642,9 @@ export default function HangmanApp() {
               loadTournamentRounds(target.roomId),
               loadVotes(target.roomCode)
             ]);
+            await loadReadyPlayers(target.roomId);
+          } else {
+            await loadReadyPlayers(target.roomId);
           }
           await loadLeaderboards();
         } while (refreshQueuedRef.current);
@@ -625,7 +653,7 @@ export default function HangmanApp() {
         setLoadingRoom(false);
       }
     },
-    [loadLeaderboards, loadPlayers, loadRoom, loadRoomState, loadRound, loadTournamentRounds, loadVotes]
+    [loadLeaderboards, loadPlayers, loadReadyPlayers, loadRoom, loadRoomState, loadRound, loadTournamentRounds, loadVotes]
   );
 
   const ensureAnonymousSession = useCallback(async (): Promise<string> => {
@@ -760,6 +788,7 @@ export default function HangmanApp() {
     setGuesses([]);
     setEvents([]);
     setQuickChats([]);
+    setReadyPlayerIds([]);
     setLeaderboards({ global: [], weekly: [], monthly: [], season: [] });
     setProfilesByUser({});
     setVotes(EMPTY_VOTES);
@@ -776,6 +805,13 @@ export default function HangmanApp() {
 
   const startRound = useCallback(async () => {
     if (!supabase || !joinState) return;
+    const readySet = new Set(readyPlayerIds);
+    const everyoneReady = players.length > 0 && players.every((player) => readySet.has(player.id));
+    if (!everyoneReady) {
+      setActionError("Todos los jugadores activos deben marcar Ready antes de iniciar.");
+      return;
+    }
+
     setIsStartingRound(true);
     setActionError(null);
 
@@ -792,7 +828,7 @@ export default function HangmanApp() {
     } finally {
       setIsStartingRound(false);
     }
-  }, [categoryFilter, difficultyFilter, joinState, loadRound, loadVotes, supabase]);
+  }, [categoryFilter, difficultyFilter, joinState, loadRound, loadVotes, players, readyPlayerIds, supabase]);
 
   const guessLetter = useCallback(
     async (letter: string) => {
@@ -889,6 +925,27 @@ export default function HangmanApp() {
       }
     },
     [joinState, loadPlayers, loadRoom, supabase]
+  );
+
+  const setReadyStatus = useCallback(
+    async (ready: boolean) => {
+      if (!supabase || !joinState || round?.status === "playing") return;
+      setIsSettingReady(true);
+      setActionError(null);
+      try {
+        const { error } = await supabase.rpc("set_ready_start", {
+          p_room_code: joinState.roomCode,
+          p_ready: ready
+        });
+        if (error) throw new Error(error.message);
+        await Promise.all([loadReadyPlayers(joinState.roomId), loadVotes(joinState.roomCode)]);
+      } catch (error) {
+        setActionError(error instanceof Error ? error.message : "No se pudo actualizar estado Ready.");
+      } finally {
+        setIsSettingReady(false);
+      }
+    },
+    [joinState, loadReadyPlayers, loadVotes, round?.status, supabase]
   );
 
   const voteRematch = useCallback(async () => {
@@ -1218,8 +1275,13 @@ export default function HangmanApp() {
     return players.find((player) => player.id === round.winner_player_id)?.display_name ?? "Jugador";
   }, [players, round?.winner_player_id]);
 
+  const readySet = useMemo(() => new Set(readyPlayerIds), [readyPlayerIds]);
+  const readyCount = useMemo(() => players.filter((player) => readySet.has(player.id)).length, [players, readySet]);
+  const allPlayersReady = useMemo(() => players.length > 0 && readyCount === players.length, [players.length, readyCount]);
+  const meReady = useMemo(() => Boolean(me && readySet.has(me.id)), [me, readySet]);
+
   const isMyTurn = Boolean(me && round?.status === "playing" && round.active_turn_player_id === me.id);
-  const canStartRound = Boolean(me?.is_host && (!round || round.status !== "playing"));
+  const canStartRound = Boolean(me?.is_host && (!round || round.status !== "playing") && allPlayersReady);
   const canActivateDouble = Boolean(
     isMyTurn &&
       round?.status === "playing" &&
@@ -1496,7 +1558,39 @@ export default function HangmanApp() {
                   </p>
 
                   <div className="round-stage">
-                    <HangmanFigure errors={round.errors_count} maxErrors={round.max_errors} status={round.status} />
+                    <div className="hangman-column">
+                      <HangmanFigure errors={round.errors_count} maxErrors={round.max_errors} status={round.status} />
+                      <section className="keyboard keyboard-inline">
+                        <h3>Teclado</h3>
+                        <p className="muted">{isMyTurn ? "Es tu turno" : "Espera tu turno para jugar una letra"}</p>
+                        <div className={`keys theme-${settings.keyboardTheme}`}>
+                          {ALPHABET.map((letter) => {
+                            const alreadyUsed = guessedLetters.has(letter);
+                            const isBusy = busyLetter === letter;
+                            const blockedByVowel = Boolean(round?.block_vowels && ["A", "E", "I", "O", "U"].includes(letter));
+                            const disabled =
+                              round?.status !== "playing" ||
+                              !isMyTurn ||
+                              alreadyUsed ||
+                              Boolean(busyLetter) ||
+                              isSkippingTurn ||
+                              blockedByVowel;
+
+                            return (
+                              <button
+                                key={letter}
+                                type="button"
+                                className={`key ${alreadyUsed ? "used" : ""} ${blockedByVowel ? "blocked" : ""}`}
+                                disabled={disabled}
+                                onClick={() => void guessLetter(letter)}
+                              >
+                                {isBusy ? "..." : letter}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    </div>
                     <div className="round-meta">
                       <p>
                         Categoria: <strong>{round.category}</strong>
@@ -1557,12 +1651,12 @@ export default function HangmanApp() {
                     placeholder="Categoria (opcional)"
                     value={categoryFilter}
                     onChange={(event) => setCategoryFilter(event.target.value)}
-                    disabled={!canStartRound}
+                    disabled={!me?.is_host || round?.status === "playing"}
                   />
                   <select
                     value={difficultyFilter}
                     onChange={(event) => setDifficultyFilter(toDifficulty(event.target.value) ?? "")}
-                    disabled={!canStartRound}
+                    disabled={!me?.is_host || round?.status === "playing"}
                   >
                     <option value="">Dificultad: cualquiera</option>
                     <option value="easy">easy</option>
@@ -1571,13 +1665,35 @@ export default function HangmanApp() {
                   </select>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => void startRound()}
-                  disabled={!canStartRound || isStartingRound}
-                >
-                  {isStartingRound ? "Iniciando..." : round?.status === "playing" ? "Ronda en curso" : "Nueva ronda"}
-                </button>
+                <section className="ready-panel">
+                  <p>
+                    Estado Ready: <strong>{readyCount}</strong> / {players.length}
+                  </p>
+                  <div className="control-row">
+                    <button
+                      type="button"
+                      onClick={() => void setReadyStatus(!meReady)}
+                      disabled={isSettingReady || round?.status === "playing"}
+                    >
+                      {isSettingReady ? "Actualizando..." : meReady ? "Quitar Ready" : "Estoy Ready"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void startRound()}
+                      disabled={!canStartRound || isStartingRound}
+                    >
+                      {isStartingRound
+                        ? "Iniciando..."
+                        : round?.status === "playing"
+                          ? "Ronda en curso"
+                          : me?.is_host
+                            ? allPlayersReady
+                              ? "Iniciar ronda (Host)"
+                              : "Esperando Ready de todos"
+                            : "Solo el host inicia"}
+                    </button>
+                  </div>
+                </section>
 
                 <div className="control-row">
                   <button
@@ -1662,6 +1778,7 @@ export default function HangmanApp() {
                       <span>
                         {index + 1}. {player.display_name} {player.team ? `[${player.team}]` : ""}{" "}
                         {player.is_host ? "(Host)" : ""} {round?.active_turn_player_id === player.id ? "-> turno" : ""}
+                        {readySet.has(player.id) ? " | READY" : " | NO READY"}
                         {profilesByUser[player.auth_user_id] ? (
                           <>
                             {" "}
@@ -1676,6 +1793,9 @@ export default function HangmanApp() {
               )}
 
               <div className="votes">
+                <p>
+                  Ready inicio: <strong>{readyCount}</strong> / {players.length}
+                </p>
                 <p>
                   Votos revancha: <strong>{votes.rematch_votes}</strong> / {votes.needed}
                 </p>
@@ -1875,37 +1995,6 @@ export default function HangmanApp() {
               </section>
             </section>
           </div>
-
-          <section className="card keyboard">
-            <h2>Teclado</h2>
-            <p className="muted">{isMyTurn ? "Es tu turno" : "Espera tu turno para jugar una letra"}</p>
-            <div className={`keys theme-${settings.keyboardTheme}`}>
-              {ALPHABET.map((letter) => {
-                const alreadyUsed = guessedLetters.has(letter);
-                const isBusy = busyLetter === letter;
-                const blockedByVowel = Boolean(round?.block_vowels && ["A", "E", "I", "O", "U"].includes(letter));
-                const disabled =
-                  round?.status !== "playing" ||
-                  !isMyTurn ||
-                  alreadyUsed ||
-                  Boolean(busyLetter) ||
-                  isSkippingTurn ||
-                  blockedByVowel;
-
-                return (
-                  <button
-                    key={letter}
-                    type="button"
-                    className={`key ${alreadyUsed ? "used" : ""} ${blockedByVowel ? "blocked" : ""}`}
-                    disabled={disabled}
-                    onClick={() => void guessLetter(letter)}
-                  >
-                    {isBusy ? "..." : letter}
-                  </button>
-                );
-              })}
-            </div>
-          </section>
 
           {actionError ? <p className="error floating-error">{actionError}</p> : null}
         </section>

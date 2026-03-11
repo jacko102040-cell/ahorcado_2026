@@ -100,6 +100,9 @@ export type VoteStatus = {
   rematch_votes: number;
   reset_votes: number;
   free_hint_votes?: number;
+  ready_start_votes?: number;
+  total_active?: number;
+  all_ready?: boolean;
   needed: number;
 };
 

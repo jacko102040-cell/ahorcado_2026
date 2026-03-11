@@ -32,7 +32,7 @@ alter table public.rounds
 alter table public.room_votes drop constraint if exists room_votes_vote_type_check;
 alter table public.room_votes
   add constraint room_votes_vote_type_check
-  check (vote_type in ('rematch', 'reset_scores', 'free_hint'));
+  check (vote_type in ('rematch', 'reset_scores', 'free_hint', 'ready_start'));
 
 create or replace function public.get_next_turn_player(p_room_id uuid, p_after_player_id uuid default null)
 returns uuid
@@ -168,6 +168,74 @@ begin
   where id = v_round.id;
 
   return v_round;
+end;
+$$;
+
+create or replace function public.start_round(
+  p_room_code text,
+  p_category text default null,
+  p_difficulty text default null
+)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_room_id uuid;
+  v_player_id uuid;
+  v_is_host boolean;
+  v_round_id uuid;
+  v_ready int;
+  v_total int;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.id, p.id, p.is_host
+  into v_room_id, v_player_id, v_is_host
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room_id is null then
+    raise exception 'Player not in room';
+  end if;
+  if not v_is_host then
+    raise exception 'Only host can start rounds';
+  end if;
+
+  perform public.prune_inactive_players(v_code, 75);
+
+  select count(*)::int into v_total
+  from public.players
+  where room_id = v_room_id
+    and is_active = true;
+
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
+  if v_total = 0 or v_ready <> v_total then
+    raise exception 'All active players must be ready';
+  end if;
+
+  v_round_id := public.start_round_internal(v_room_id, v_player_id, p_category, p_difficulty);
+
+  delete from public.room_votes
+  where room_id = v_room_id
+    and vote_type = 'ready_start';
+
+  return v_round_id;
 end;
 $$;
 
@@ -356,6 +424,78 @@ begin
 end;
 $$;
 
+create or replace function public.set_ready_start(
+  p_room_code text,
+  p_ready boolean default true
+)
+returns table(
+  ready_start_votes int,
+  total_active int,
+  all_ready boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_room_id uuid;
+  v_player_id uuid;
+  v_ready int;
+  v_total int;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.id, p.id
+  into v_room_id, v_player_id
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room_id is null then
+    raise exception 'Player not in room';
+  end if;
+
+  if exists (
+    select 1 from public.rounds
+    where room_id = v_room_id and status = 'playing'
+  ) then
+    raise exception 'Cannot change ready status during a round';
+  end if;
+
+  if p_ready then
+    insert into public.room_votes(room_id, vote_type, player_id)
+    values (v_room_id, 'ready_start', v_player_id)
+    on conflict (room_id, vote_type, player_id) do nothing;
+  else
+    delete from public.room_votes
+    where room_id = v_room_id
+      and vote_type = 'ready_start'
+      and player_id = v_player_id;
+  end if;
+
+  select count(*)::int into v_total
+  from public.players
+  where room_id = v_room_id and is_active = true;
+
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
+  return query
+  select v_ready, v_total, (v_total > 0 and v_ready = v_total);
+end;
+$$;
+
 drop function if exists public.get_vote_status(text);
 
 create or replace function public.get_vote_status(p_room_code text)
@@ -363,6 +503,9 @@ returns table(
   rematch_votes int,
   reset_votes int,
   free_hint_votes int,
+  ready_start_votes int,
+  total_active int,
+  all_ready boolean,
   needed int
 )
 language plpgsql
@@ -377,6 +520,7 @@ declare
   v_rematch int;
   v_reset int;
   v_hint int;
+  v_ready int;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -411,8 +555,15 @@ begin
   from public.room_votes
   where room_id = v_room_id and vote_type = 'free_hint';
 
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
   return query
-  select v_rematch, v_reset, v_hint, public.needed_votes(v_active);
+  select v_rematch, v_reset, v_hint, v_ready, v_active, (v_active > 0 and v_ready = v_active), public.needed_votes(v_active);
 end;
 $$;
 
@@ -500,6 +651,74 @@ begin
 
   return query
   select false, v_votes, v_needed;
+end;
+$$;
+
+create or replace function public.vote_rematch(p_room_code text)
+returns table(
+  resolved boolean,
+  round_id uuid,
+  rematch_votes int,
+  needed int
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_room_id uuid;
+  v_player_id uuid;
+  v_round_active boolean;
+  v_votes int;
+  v_active int;
+  v_needed int;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.id, p.id
+  into v_room_id, v_player_id
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room_id is null then
+    raise exception 'Player not in room';
+  end if;
+
+  insert into public.room_votes(room_id, vote_type, player_id)
+  values (v_room_id, 'rematch', v_player_id)
+  on conflict (room_id, vote_type, player_id) do nothing;
+
+  select count(*)::int into v_active
+  from public.players
+  where room_id = v_room_id and is_active = true;
+
+  v_needed := public.needed_votes(v_active);
+
+  select count(*)::int into v_votes
+  from public.room_votes
+  where room_id = v_room_id and vote_type = 'rematch';
+
+  select exists (
+    select 1 from public.rounds
+    where room_id = v_room_id and status = 'playing'
+  ) into v_round_active;
+
+  if v_votes >= v_needed and not v_round_active then
+    return query
+    select true, null::uuid, v_votes, v_needed;
+    return;
+  end if;
+
+  return query
+  select false, null::uuid, v_votes, v_needed;
 end;
 $$;
 
@@ -647,6 +866,7 @@ $$;
 grant execute on function public.set_tournament_mode(text, boolean, int) to authenticated;
 grant execute on function public.set_block_vowels(text, boolean) to authenticated;
 grant execute on function public.activate_double_points(text) to authenticated;
+grant execute on function public.set_ready_start(text, boolean) to authenticated;
 grant execute on function public.vote_free_hint(text) to authenticated;
 
 commit;

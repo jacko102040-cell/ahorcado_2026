@@ -180,7 +180,7 @@ create index idx_guesses_round on public.guesses(round_id);
 create table public.room_votes (
   id bigserial primary key,
   room_id uuid not null references public.rooms(id) on delete cascade,
-  vote_type text not null check (vote_type in ('rematch', 'reset_scores')),
+  vote_type text not null check (vote_type in ('rematch', 'reset_scores', 'free_hint', 'ready_start')),
   player_id uuid not null references public.players(id) on delete cascade,
   created_at timestamptz not null default now(),
   unique(room_id, vote_type, player_id)
@@ -384,7 +384,7 @@ begin
 
   delete from public.room_votes
   where room_id = p_room_id
-    and vote_type = 'rematch';
+    and vote_type in ('rematch', 'ready_start');
 
   return v_round_id;
 end;
@@ -416,6 +416,14 @@ begin
   where room_id = v_room_id
     and is_active = true
     and last_seen_at < now() - make_interval(secs => greatest(10, p_stale_seconds));
+
+  delete from public.room_votes v
+  using public.players p
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and v.player_id = p.id
+    and p.room_id = v_room_id
+    and p.is_active = false;
 
   perform public.ensure_host(v_room_id);
 
@@ -752,6 +760,8 @@ declare
   v_player_id uuid;
   v_is_host boolean;
   v_round_id uuid;
+  v_ready int;
+  v_total int;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -774,6 +784,22 @@ begin
   end if;
 
   perform public.prune_inactive_players(v_code, 75);
+
+  select count(*)::int into v_total
+  from public.players
+  where room_id = v_room_id
+    and is_active = true;
+
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
+  if v_total = 0 or v_ready <> v_total then
+    raise exception 'All active players must be ready';
+  end if;
 
   v_round_id := public.start_round_internal(v_room_id, v_player_id, p_category, p_difficulty);
   return v_round_id;
@@ -861,6 +887,78 @@ begin
   where id = v_round.id;
 
   return v_round;
+end;
+$$;
+
+create or replace function public.set_ready_start(
+  p_room_code text,
+  p_ready boolean default true
+)
+returns table(
+  ready_start_votes int,
+  total_active int,
+  all_ready boolean
+)
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_room_id uuid;
+  v_player_id uuid;
+  v_ready int;
+  v_total int;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.id, p.id
+  into v_room_id, v_player_id
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room_id is null then
+    raise exception 'Player not in room';
+  end if;
+
+  if exists (
+    select 1 from public.rounds
+    where room_id = v_room_id and status = 'playing'
+  ) then
+    raise exception 'Cannot change ready status during a round';
+  end if;
+
+  if p_ready then
+    insert into public.room_votes(room_id, vote_type, player_id)
+    values (v_room_id, 'ready_start', v_player_id)
+    on conflict (room_id, vote_type, player_id) do nothing;
+  else
+    delete from public.room_votes
+    where room_id = v_room_id
+      and vote_type = 'ready_start'
+      and player_id = v_player_id;
+  end if;
+
+  select count(*)::int into v_total
+  from public.players
+  where room_id = v_room_id and is_active = true;
+
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
+  return query
+  select v_ready, v_total, (v_total > 0 and v_ready = v_total);
 end;
 $$;
 
@@ -1066,6 +1164,10 @@ create or replace function public.get_vote_status(p_room_code text)
 returns table(
   rematch_votes int,
   reset_votes int,
+  free_hint_votes int,
+  ready_start_votes int,
+  total_active int,
+  all_ready boolean,
   needed int
 )
 language plpgsql
@@ -1079,6 +1181,8 @@ declare
   v_active int;
   v_rematch int;
   v_reset int;
+  v_hint int;
+  v_ready int;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -1109,8 +1213,19 @@ begin
   from public.room_votes
   where room_id = v_room_id and vote_type = 'reset_scores';
 
+  select count(*)::int into v_hint
+  from public.room_votes
+  where room_id = v_room_id and vote_type = 'free_hint';
+
+  select count(*)::int into v_ready
+  from public.room_votes v
+  join public.players p on p.id = v.player_id
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and p.is_active = true;
+
   return query
-  select v_rematch, v_reset, public.needed_votes(v_active);
+  select v_rematch, v_reset, v_hint, v_ready, v_active, (v_active > 0 and v_ready = v_active), public.needed_votes(v_active);
 end;
 $$;
 
@@ -1134,7 +1249,6 @@ declare
   v_votes int;
   v_active int;
   v_needed int;
-  v_round_id uuid;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -1173,12 +1287,9 @@ begin
   ) into v_round_active;
 
   if v_votes >= v_needed and not v_round_active then
-    v_round_id := public.start_round_internal(v_room_id, v_player_id, null, null);
-    delete from public.room_votes
-    where room_id = v_room_id and vote_type = 'rematch';
-
     return query
-    select true, v_round_id, v_votes, v_needed;
+    select true, null::uuid, v_votes, v_needed;
+    return;
   end if;
 
   return query
@@ -1312,6 +1423,14 @@ begin
   where room_id = v_room_id
     and auth_user_id = v_uid;
 
+  delete from public.room_votes v
+  using public.players p
+  where v.room_id = v_room_id
+    and v.vote_type = 'ready_start'
+    and v.player_id = p.id
+    and p.room_id = v_room_id
+    and p.auth_user_id = v_uid;
+
   perform public.ensure_host(v_room_id);
 end;
 $$;
@@ -1320,6 +1439,7 @@ grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.is_room_member(uuid, uuid) to authenticated;
 grant execute on function public.set_team_mode(text, boolean) to authenticated;
 grant execute on function public.start_round(text, text, text) to authenticated;
+grant execute on function public.set_ready_start(text, boolean) to authenticated;
 grant execute on function public.guess_letter(text, text) to authenticated;
 grant execute on function public.use_hint(text) to authenticated;
 grant execute on function public.advance_turn(text, boolean) to authenticated;

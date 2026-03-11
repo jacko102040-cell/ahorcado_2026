@@ -107,7 +107,7 @@ button:disabled {
 }
 
 .game-shell {
-  width: min(1080px, 100%);
+  width: min(1360px, 100%);
   display: grid;
   gap: 16px;
 }
@@ -143,8 +143,9 @@ button:disabled {
 
 .layout-grid {
   display: grid;
-  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(0, 2.35fr) minmax(360px, 1fr);
+  gap: 18px;
+  align-items: start;
 }
 
 .board {
@@ -154,9 +155,14 @@ button:disabled {
 
 .round-stage {
   display: grid;
-  grid-template-columns: minmax(0, 240px) minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
+  grid-template-columns: minmax(320px, 1.35fr) minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+}
+
+.hangman-column {
+  display: grid;
+  gap: 10px;
 }
 
 .round-meta {
@@ -254,6 +260,16 @@ button:disabled {
   display: grid;
   gap: 8px;
   justify-items: start;
+}
+
+.ready-panel {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #f8fbff;
+  display: grid;
+  gap: 8px;
 }
 
 .powerups,
@@ -541,6 +557,11 @@ button:disabled {
   padding: 10px;
 }
 
+.scoreboard li span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .scoreboard li.me {
   border-color: #8fb4ff;
   background: #f3f8ff;
@@ -562,6 +583,18 @@ button:disabled {
   gap: 12px;
 }
 
+.keyboard-inline {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #fbfcff;
+}
+
+.keyboard-inline h3 {
+  margin: 0;
+  font-size: 1rem;
+}
+
 .keys {
   display: grid;
   grid-template-columns: repeat(9, minmax(0, 1fr));
@@ -569,7 +602,7 @@ button:disabled {
 }
 
 .key {
-  min-height: 42px;
+  min-height: 40px;
   border-radius: 8px;
 }
 
