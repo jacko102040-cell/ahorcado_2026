@@ -458,18 +458,28 @@ drop policy if exists room_votes_select_same_room on public.room_votes;
 drop policy if exists deny_words_all on public.words;
 drop policy if exists deny_round_secrets_all on public.round_secrets;
 
+create or replace function public.is_room_member(p_room_id uuid, p_uid uuid default auth.uid())
+returns boolean
+language sql
+security definer
+stable
+set search_path = public
+as $$
+  select exists (
+    select 1
+    from public.players p
+    where p.room_id = p_room_id
+      and p.auth_user_id = p_uid
+      and p.is_active = true
+  );
+$$;
+
 create policy rooms_select_member
 on public.rooms
 for select
 to authenticated
 using (
-  exists (
-    select 1
-    from public.players p
-    where p.room_id = rooms.id
-      and p.auth_user_id = auth.uid()
-      and p.is_active = true
-  )
+  public.is_room_member(rooms.id)
 );
 
 create policy players_select_same_room
@@ -477,13 +487,7 @@ on public.players
 for select
 to authenticated
 using (
-  exists (
-    select 1
-    from public.players me
-    where me.room_id = players.room_id
-      and me.auth_user_id = auth.uid()
-      and me.is_active = true
-  )
+  public.is_room_member(players.room_id)
 );
 
 create policy rounds_select_same_room
@@ -491,13 +495,7 @@ on public.rounds
 for select
 to authenticated
 using (
-  exists (
-    select 1
-    from public.players me
-    where me.room_id = rounds.room_id
-      and me.auth_user_id = auth.uid()
-      and me.is_active = true
-  )
+  public.is_room_member(rounds.room_id)
 );
 
 create policy guesses_select_same_room
@@ -507,11 +505,9 @@ to authenticated
 using (
   exists (
     select 1
-    from public.players me
-    join public.rounds r on r.id = guesses.round_id
-    where me.room_id = r.room_id
-      and me.auth_user_id = auth.uid()
-      and me.is_active = true
+    from public.rounds r
+    where r.id = guesses.round_id
+      and public.is_room_member(r.room_id)
   )
 );
 
@@ -520,13 +516,7 @@ on public.room_votes
 for select
 to authenticated
 using (
-  exists (
-    select 1
-    from public.players me
-    where me.room_id = room_votes.room_id
-      and me.auth_user_id = auth.uid()
-      and me.is_active = true
-  )
+  public.is_room_member(room_votes.room_id)
 );
 
 create policy deny_words_all
@@ -568,6 +558,7 @@ language plpgsql
 security definer
 set search_path = public
 as $$
+#variable_conflict use_column
 declare
   v_uid uuid := auth.uid();
   v_code text := public.normalize_room_code(p_room_code);
@@ -601,15 +592,15 @@ begin
 
   perform public.prune_inactive_players(v_code, 75);
 
-  select * into v_player
-  from public.players
-  where room_id = v_room.id
-    and auth_user_id = v_uid;
+  select p.* into v_player
+  from public.players p
+  where p.room_id = v_room.id
+    and p.auth_user_id = v_uid;
 
   if v_player.id is null then
     select coalesce(max(turn_order), 0) + 1 into v_turn_order
-    from public.players
-    where room_id = v_room.id;
+    from public.players p
+    where p.room_id = v_room.id;
   else
     v_turn_order := v_player.turn_order;
   end if;
@@ -619,12 +610,12 @@ begin
   if v_room.team_mode then
     if v_team is null then
       select count(*)::int into v_count_a
-      from public.players
-      where room_id = v_room.id and is_active = true and team = 'A';
+      from public.players p
+      where p.room_id = v_room.id and p.is_active = true and p.team = 'A';
 
       select count(*)::int into v_count_b
-      from public.players
-      where room_id = v_room.id and is_active = true and team = 'B';
+      from public.players p
+      where p.room_id = v_room.id and p.is_active = true and p.team = 'B';
 
       if v_req_team is not null and abs(v_count_a - v_count_b) <= 1 then
         v_team := v_req_team;
@@ -640,7 +631,7 @@ begin
 
   insert into public.players(room_id, auth_user_id, display_name, team, turn_order, is_active, last_seen_at)
   values (v_room.id, v_uid, v_name, v_team, v_turn_order, true, now())
-  on conflict (room_id, auth_user_id)
+  on conflict on constraint players_room_id_auth_user_id_key
   do update
      set display_name = excluded.display_name,
          team = excluded.team,
@@ -1312,6 +1303,7 @@ end;
 $$;
 
 grant execute on function public.join_room(text, text, text) to authenticated;
+grant execute on function public.is_room_member(uuid, uuid) to authenticated;
 grant execute on function public.set_team_mode(text, boolean) to authenticated;
 grant execute on function public.start_round(text, text, text) to authenticated;
 grant execute on function public.guess_letter(text, text) to authenticated;

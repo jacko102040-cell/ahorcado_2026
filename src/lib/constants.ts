@@ -5,3 +5,5 @@ export const TURN_TICK_MS = 1_000;
 export const ROOM_STORAGE_KEY = "hangman_room";
 export const NAME_STORAGE_KEY = "hangman_name";
 export const ADMIN_TOKEN_STORAGE_KEY = "hangman_admin_token";
+export const SETTINGS_STORAGE_KEY = "hangman_settings";
+export const ACHIEVEMENTS_STORAGE_KEY = "hangman_achievements";
