@@ -27,6 +27,143 @@ alter table public.room_votes
   add constraint room_votes_vote_type_check
   check (vote_type in ('rematch', 'reset_scores', 'free_hint'));
 
+create or replace function public.get_next_turn_player(p_room_id uuid, p_after_player_id uuid default null)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_after_order int;
+  v_next uuid;
+begin
+  if p_after_player_id is not null then
+    select turn_order into v_after_order
+    from public.players
+    where id = p_after_player_id
+      and room_id = p_room_id;
+  end if;
+
+  if v_after_order is not null then
+    select id into v_next
+    from public.players
+    where room_id = p_room_id
+      and is_active = true
+      and (
+        turn_order > v_after_order
+        or (turn_order = v_after_order and id > p_after_player_id)
+      )
+    order by turn_order asc, id asc
+    limit 1;
+  end if;
+
+  if v_next is null then
+    select id into v_next
+    from public.players
+    where room_id = p_room_id
+      and is_active = true
+      and (p_after_player_id is null or id <> p_after_player_id)
+    order by turn_order asc, id asc
+    limit 1;
+  end if;
+
+  if v_next is null and p_after_player_id is not null then
+    select id into v_next
+    from public.players
+    where room_id = p_room_id
+      and is_active = true
+    order by turn_order asc, id asc
+    limit 1;
+  end if;
+
+  return v_next;
+end;
+$$;
+
+create or replace function public.advance_turn(p_room_code text, p_force boolean default false)
+returns public.rounds
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_room public.rooms%rowtype;
+  v_player public.players%rowtype;
+  v_round public.rounds%rowtype;
+  v_next_turn uuid;
+  v_elapsed int;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.* into v_room
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  select p.* into v_player
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room.id is null then
+    raise exception 'Player not in room';
+  end if;
+
+  perform public.prune_inactive_players(v_code, 75);
+
+  select * into v_round
+  from public.rounds
+  where room_id = v_room.id
+    and status = 'playing'
+  order by started_at desc
+  limit 1
+  for update;
+
+  if v_round.id is null then
+    raise exception 'No active round';
+  end if;
+
+  v_elapsed := extract(epoch from now() - v_round.turn_started_at)::int;
+
+  if p_force then
+    if not v_player.is_host then
+      raise exception 'Only host can force skip';
+    end if;
+  else
+    if v_elapsed < v_room.turn_seconds
+       and v_player.id <> v_round.active_turn_player_id then
+      raise exception 'Cannot skip turn before timeout';
+    end if;
+  end if;
+
+  v_next_turn := public.get_next_turn_player(v_room.id, v_round.active_turn_player_id);
+  if v_next_turn is null then
+    raise exception 'No active players available';
+  end if;
+
+  update public.rounds
+  set active_turn_player_id = v_next_turn,
+      turn_started_at = now()
+  where id = v_round.id;
+
+  select * into v_round
+  from public.rounds
+  where id = v_round.id;
+
+  return v_round;
+end;
+$$;
+
 create or replace function public.set_tournament_mode(
   p_room_code text,
   p_enabled boolean,

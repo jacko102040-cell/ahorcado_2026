@@ -269,6 +269,7 @@ export default function HangmanApp() {
   const [turnTick, setTurnTick] = useState<number>(Date.now());
   const autoJoinTriedRef = useRef(false);
   const autoTurnGuardRef = useRef<string>("");
+  const guessTurnGuardRef = useRef<string>("");
   const outcomeGuardRef = useRef<string>("");
   const bgmRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -743,6 +744,7 @@ export default function HangmanApp() {
     setProfilesByUser({});
     setVotes(EMPTY_VOTES);
     autoTurnGuardRef.current = "";
+    guessTurnGuardRef.current = "";
     outcomeGuardRef.current = "";
     setRoundOutcomeFx(null);
   }, [joinState, supabase]);
@@ -776,6 +778,11 @@ export default function HangmanApp() {
     async (letter: string) => {
       if (!supabase || !joinState || !round || round.status !== "playing") return;
       if (round.correct_letters.includes(letter) || round.wrong_letters.includes(letter)) return;
+      if (busyLetter) return;
+
+      const turnKey = `${round.id}:${round.active_turn_player_id}:${round.turn_started_at}`;
+      if (guessTurnGuardRef.current === turnKey) return;
+      guessTurnGuardRef.current = turnKey;
 
       setBusyLetter(letter);
       setActionError(null);
@@ -787,16 +794,25 @@ export default function HangmanApp() {
         if (error) throw new Error(error.message);
         const updated = (Array.isArray(data) ? data[0] : data) as RoundRow | null;
         if (updated) {
+          setRound({
+            ...updated,
+            block_vowels: updated.block_vowels ?? false,
+            double_points_player_id: updated.double_points_player_id ?? null,
+            double_points_consumed: updated.double_points_consumed ?? false
+          });
+          setTurnTick(Date.now());
           const isCorrect = updated.correct_letters.includes(letter);
           playEventSound(isCorrect ? "hit" : "miss");
         }
       } catch (error) {
         setActionError(error instanceof Error ? error.message : "No se pudo enviar la letra.");
+        guessTurnGuardRef.current = "";
+        void refreshJoinedState(joinState);
       } finally {
         setBusyLetter(null);
       }
     },
-    [joinState, playEventSound, round, supabase]
+    [busyLetter, joinState, playEventSound, refreshJoinedState, round, supabase]
   );
 
   const requestHint = useCallback(async () => {
@@ -1094,7 +1110,7 @@ export default function HangmanApp() {
   }, [joinState, refreshJoinedState, supabase]);
 
   useEffect(() => {
-    if (!joinState || !round || round.status !== "playing") return;
+    if (!joinState || !round || round.status !== "playing" || round.active_turn_player_id !== joinState.playerId) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toUpperCase();
@@ -1252,9 +1268,17 @@ export default function HangmanApp() {
     return Math.max(room.turn_seconds - elapsed, 0);
   }, [room, round, turnTick]);
   const isTurnCritical = Boolean(round?.status === "playing" && turnSecondsLeft !== null && turnSecondsLeft <= 5);
+  const turnGuardKey = useMemo(
+    () => (round ? `${round.id}:${round.active_turn_player_id ?? "none"}:${round.turn_started_at}` : ""),
+    [round]
+  );
 
   useEffect(() => {
-    if (!joinState || !round || round.status !== "playing" || turnSecondsLeft === null) return;
+    guessTurnGuardRef.current = "";
+  }, [turnGuardKey]);
+
+  useEffect(() => {
+    if (!joinState || !round || round.status !== "playing" || turnSecondsLeft === null || !isMyTurn) return;
     if (turnSecondsLeft > 0) return;
 
     const guard = `${round.id}:${round.active_turn_player_id}:${round.turn_started_at}`;
@@ -1262,7 +1286,7 @@ export default function HangmanApp() {
     autoTurnGuardRef.current = guard;
 
     void advanceTurn(false);
-  }, [advanceTurn, joinState, round, turnSecondsLeft]);
+  }, [advanceTurn, isMyTurn, joinState, round, turnSecondsLeft]);
 
   if (clientError) {
     return (
@@ -1730,7 +1754,7 @@ export default function HangmanApp() {
               <section className="social-panel">
                 <h3>Leaderboards</h3>
                 <div className="leaderboard-grid">
-                  <div>
+                  <div className="leaderboard-block">
                     <p className="muted">Global ELO</p>
                     <ul className="mini-list">
                       {leaderboards.global.slice(0, 5).map((entry) => (
@@ -1741,7 +1765,7 @@ export default function HangmanApp() {
                       ))}
                     </ul>
                   </div>
-                  <div>
+                  <div className="leaderboard-block">
                     <p className="muted">Semanal</p>
                     <ul className="mini-list">
                       {leaderboards.weekly.slice(0, 5).map((entry) => (
@@ -1752,7 +1776,7 @@ export default function HangmanApp() {
                       ))}
                     </ul>
                   </div>
-                  <div>
+                  <div className="leaderboard-block">
                     <p className="muted">Mensual</p>
                     <ul className="mini-list">
                       {leaderboards.monthly.slice(0, 5).map((entry) => (
@@ -1763,7 +1787,7 @@ export default function HangmanApp() {
                       ))}
                     </ul>
                   </div>
-                  <div>
+                  <div className="leaderboard-block">
                     <p className="muted">Temporada</p>
                     <ul className="mini-list">
                       {leaderboards.season.slice(0, 5).map((entry) => (
@@ -1779,7 +1803,7 @@ export default function HangmanApp() {
 
               <section className="social-panel">
                 <h3>Sugerir palabra</h3>
-                <div className="admin-grid">
+                <div className="suggest-grid">
                   <input
                     type="text"
                     placeholder="PALABRA"
@@ -1798,14 +1822,16 @@ export default function HangmanApp() {
                     value={wordCategory}
                     onChange={(event) => setWordCategory(event.target.value.toLowerCase())}
                   />
-                  <select value={wordDifficulty} onChange={(event) => setWordDifficulty(event.target.value as Difficulty)}>
-                    <option value="easy">easy</option>
-                    <option value="medium">medium</option>
-                    <option value="hard">hard</option>
-                  </select>
-                  <button type="button" onClick={() => void submitWordSuggestion()} disabled={isSubmittingWord}>
-                    {isSubmittingWord ? "Enviando..." : "Enviar"}
-                  </button>
+                  <div className="suggest-actions">
+                    <select value={wordDifficulty} onChange={(event) => setWordDifficulty(event.target.value as Difficulty)}>
+                      <option value="easy">easy</option>
+                      <option value="medium">medium</option>
+                      <option value="hard">hard</option>
+                    </select>
+                    <button type="button" onClick={() => void submitWordSuggestion()} disabled={isSubmittingWord}>
+                      {isSubmittingWord ? "Enviando..." : "Enviar"}
+                    </button>
+                  </div>
                 </div>
               </section>
             </section>

@@ -215,8 +215,11 @@ begin
     from public.players
     where room_id = p_room_id
       and is_active = true
-      and turn_order > v_after_order
-    order by turn_order asc, joined_at asc
+      and (
+        turn_order > v_after_order
+        or (turn_order = v_after_order and id > p_after_player_id)
+      )
+    order by turn_order asc, id asc
     limit 1;
   end if;
 
@@ -225,7 +228,17 @@ begin
     from public.players
     where room_id = p_room_id
       and is_active = true
-    order by turn_order asc, joined_at asc
+      and (p_after_player_id is null or id <> p_after_player_id)
+    order by turn_order asc, id asc
+    limit 1;
+  end if;
+
+  if v_next is null and p_after_player_id is not null then
+    select id into v_next
+    from public.players
+    where room_id = p_room_id
+      and is_active = true
+    order by turn_order asc, id asc
     limit 1;
   end if;
 
@@ -827,7 +840,8 @@ begin
       raise exception 'Only host can force skip';
     end if;
   else
-    if v_player.id <> v_round.active_turn_player_id and not v_player.is_host and v_elapsed < v_room.turn_seconds then
+    if v_elapsed < v_room.turn_seconds
+       and v_player.id <> v_round.active_turn_player_id then
       raise exception 'Cannot skip turn before timeout';
     end if;
   end if;
