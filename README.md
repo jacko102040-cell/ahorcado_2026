@@ -60,3 +60,4 @@ Panel admin: `http://localhost:3000/admin`
 ## Consideracion de version de esquema
 `supabase/schema.sql` incluye un bloque de reset (`drop table if exists ...`) pensado para ambiente nuevo o DB reset.
 "# ahorcado_2026" 
+# ahorcado_2026
