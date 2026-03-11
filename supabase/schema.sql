@@ -97,7 +97,7 @@ create table public.rooms (
   id uuid primary key default gen_random_uuid(),
   code text not null unique check (char_length(code) between 3 and 16),
   team_mode boolean not null default false,
-  turn_seconds int not null default 25 check (turn_seconds between 8 and 90),
+  turn_seconds int not null default 10 check (turn_seconds between 8 and 90),
   max_errors int not null default 6 check (max_errors between 3 and 12),
   created_at timestamptz not null default now(),
   current_round_id uuid null

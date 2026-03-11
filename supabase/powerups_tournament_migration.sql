@@ -9,6 +9,13 @@ alter table public.rooms
 alter table public.rooms
   add column if not exists tournament_best_of int not null default 3;
 
+alter table public.rooms
+  alter column turn_seconds set default 10;
+
+update public.rooms
+set turn_seconds = 10
+where turn_seconds <> 10;
+
 alter table public.rooms drop constraint if exists rooms_tournament_best_of_check;
 alter table public.rooms
   add constraint rooms_tournament_best_of_check check (tournament_best_of in (3, 5));

@@ -8,6 +8,7 @@ import {
   ACHIEVEMENTS_STORAGE_KEY,
   DEFAULT_ROOM_CODE,
   HEARTBEAT_MS,
+  ROOM_SYNC_MS,
   NAME_STORAGE_KEY,
   ROOM_STORAGE_KEY,
   SETTINGS_STORAGE_KEY,
@@ -271,6 +272,9 @@ export default function HangmanApp() {
   const autoTurnGuardRef = useRef<string>("");
   const guessTurnGuardRef = useRef<string>("");
   const outcomeGuardRef = useRef<string>("");
+  const refreshInFlightRef = useRef(false);
+  const refreshQueuedRef = useRef(false);
+  const refreshTargetRef = useRef<JoinState | null>(null);
   const bgmRef = useRef<HTMLAudioElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
@@ -590,20 +594,36 @@ export default function HangmanApp() {
 
   const refreshJoinedState = useCallback(
     async (state: JoinState) => {
-      setLoadingRoom(true);
-      setActionError(null);
-      const loadedFromRpc = await loadRoomState(state);
-      if (!loadedFromRpc) {
-        await Promise.all([
-          loadRoom(state.roomId),
-          loadPlayers(state.roomId),
-          loadRound(state.roomId),
-          loadTournamentRounds(state.roomId),
-          loadVotes(state.roomCode)
-        ]);
+      refreshTargetRef.current = state;
+      if (refreshInFlightRef.current) {
+        refreshQueuedRef.current = true;
+        return;
       }
-      await loadLeaderboards();
-      setLoadingRoom(false);
+
+      refreshInFlightRef.current = true;
+      setLoadingRoom(true);
+      try {
+        do {
+          refreshQueuedRef.current = false;
+          const target = refreshTargetRef.current ?? state;
+          setActionError(null);
+
+          const loadedFromRpc = await loadRoomState(target);
+          if (!loadedFromRpc) {
+            await Promise.all([
+              loadRoom(target.roomId),
+              loadPlayers(target.roomId),
+              loadRound(target.roomId),
+              loadTournamentRounds(target.roomId),
+              loadVotes(target.roomCode)
+            ]);
+          }
+          await loadLeaderboards();
+        } while (refreshQueuedRef.current);
+      } finally {
+        refreshInFlightRef.current = false;
+        setLoadingRoom(false);
+      }
     },
     [loadLeaderboards, loadPlayers, loadRoom, loadRoomState, loadRound, loadTournamentRounds, loadVotes]
   );
@@ -1087,7 +1107,12 @@ export default function HangmanApp() {
     const roomId = joinState.roomId;
 
     const refresh = () => {
-      void refreshJoinedState(joinState);
+      void (async () => {
+        const loaded = await loadRoomState(joinState);
+        if (!loaded) {
+          await refreshJoinedState(joinState);
+        }
+      })();
     };
 
     const channel = supabase
@@ -1107,7 +1132,21 @@ export default function HangmanApp() {
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [joinState, refreshJoinedState, supabase]);
+  }, [joinState, loadRoomState, refreshJoinedState, supabase]);
+
+  useEffect(() => {
+    if (!joinState) return;
+    const interval = window.setInterval(() => {
+      void (async () => {
+        const loaded = await loadRoomState(joinState);
+        if (!loaded) {
+          await refreshJoinedState(joinState);
+        }
+      })();
+    }, ROOM_SYNC_MS);
+
+    return () => window.clearInterval(interval);
+  }, [joinState, loadRoomState, refreshJoinedState]);
 
   useEffect(() => {
     if (!joinState || !round || round.status !== "playing" || round.active_turn_player_id !== joinState.playerId) return;
@@ -1278,7 +1317,7 @@ export default function HangmanApp() {
   }, [turnGuardKey]);
 
   useEffect(() => {
-    if (!joinState || !round || round.status !== "playing" || turnSecondsLeft === null || !isMyTurn) return;
+    if (!joinState || !round || round.status !== "playing" || turnSecondsLeft === null) return;
     if (turnSecondsLeft > 0) return;
 
     const guard = `${round.id}:${round.active_turn_player_id}:${round.turn_started_at}`;
@@ -1286,7 +1325,7 @@ export default function HangmanApp() {
     autoTurnGuardRef.current = guard;
 
     void advanceTurn(false);
-  }, [advanceTurn, isMyTurn, joinState, round, turnSecondsLeft]);
+  }, [advanceTurn, joinState, round, turnSecondsLeft]);
 
   if (clientError) {
     return (

@@ -1,4 +1,5 @@
 export const HEARTBEAT_MS = 20_000;
+export const ROOM_SYNC_MS = 3_000;
 export const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
 export const DEFAULT_ROOM_CODE = "OFICINA";
 export const TURN_TICK_MS = 1_000;
