@@ -1,0 +1,302 @@
+:root {
+  color-scheme: light;
+  --bg-top: #fff4d7;
+  --bg-bottom: #e7f1ff;
+  --card: #ffffff;
+  --ink: #1b2330;
+  --muted: #5f6b7d;
+  --primary: #155eef;
+  --primary-ink: #ffffff;
+  --danger: #c01048;
+  --border: #d5deea;
+  --shadow: 0 18px 40px rgba(34, 55, 103, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  min-height: 100%;
+}
+
+body {
+  color: var(--ink);
+  background: linear-gradient(140deg, var(--bg-top), var(--bg-bottom));
+}
+
+h1,
+h2,
+p,
+ul {
+  margin: 0;
+}
+
+.page {
+  min-height: 100dvh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+}
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 20px;
+}
+
+.join-card {
+  width: min(460px, 95vw);
+  display: grid;
+  gap: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+label {
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+input,
+select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  font: inherit;
+  color: inherit;
+  background: #fff;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  background: var(--primary);
+  color: var(--primary-ink);
+  font: inherit;
+  font-weight: 600;
+  padding: 10px 14px;
+  cursor: pointer;
+  transition: transform 120ms ease, opacity 120ms ease;
+}
+
+button.secondary {
+  background: #344054;
+}
+
+button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.game-shell {
+  width: min(1080px, 100%);
+  display: grid;
+  gap: 16px;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.topbar-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.layout-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 16px;
+}
+
+.board {
+  display: grid;
+  gap: 12px;
+}
+
+.status {
+  font-weight: 600;
+}
+
+.masked-word {
+  font-size: clamp(1.6rem, 3vw, 2.8rem);
+  letter-spacing: 0.1em;
+  font-weight: 700;
+  line-break: anywhere;
+}
+
+.round-actions {
+  display: grid;
+  gap: 8px;
+  justify-items: start;
+}
+
+.control-row {
+  width: 100%;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.scoreboard ul {
+  list-style: none;
+  padding: 0;
+  margin-top: 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.scoreboard li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.scoreboard li.me {
+  border-color: #8fb4ff;
+  background: #f3f8ff;
+}
+
+.team-score {
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.votes {
+  margin-top: 14px;
+  display: grid;
+  gap: 8px;
+}
+
+.keyboard {
+  display: grid;
+  gap: 12px;
+}
+
+.keys {
+  display: grid;
+  grid-template-columns: repeat(9, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.key {
+  min-height: 42px;
+  border-radius: 8px;
+}
+
+.key.used {
+  background: #98a2b3;
+}
+
+.floating-error {
+  padding-left: 4px;
+}
+
+.admin-shell {
+  width: min(980px, 100%);
+  display: grid;
+  gap: 12px;
+}
+
+.admin-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.admin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+
+.admin-list li {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  display: grid;
+  gap: 8px;
+}
+
+.admin-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inline input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+@media (max-width: 900px) {
+  .page {
+    padding: 14px;
+  }
+
+  .layout-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .keys {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  .control-row {
+    grid-template-columns: 1fr;
+  }
+
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 560px) {
+  .card {
+    padding: 16px;
+  }
+
+  .keys {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
+}

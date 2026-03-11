@@ -1,0 +1,7 @@
+export const HEARTBEAT_MS = 20_000;
+export const ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("");
+export const DEFAULT_ROOM_CODE = "OFICINA";
+export const TURN_TICK_MS = 1_000;
+export const ROOM_STORAGE_KEY = "hangman_room";
+export const NAME_STORAGE_KEY = "hangman_name";
+export const ADMIN_TOKEN_STORAGE_KEY = "hangman_admin_token";
