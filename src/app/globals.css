@@ -150,7 +150,7 @@ button:disabled {
 
 .board {
   display: grid;
-  gap: 12px;
+  gap: 14px;
 }
 
 .round-stage {
@@ -272,6 +272,21 @@ button:disabled {
   gap: 8px;
 }
 
+.lobby-controls {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px;
+  background: #f8fbff;
+  display: grid;
+  gap: 8px;
+}
+
+.lobby-controls h3 {
+  margin: 0;
+  font-size: 0.96rem;
+}
+
 .powerups,
 .tournament,
 .achievements {
@@ -355,6 +370,11 @@ button:disabled {
   gap: 6px;
 }
 
+.event-list {
+  max-height: 250px;
+  overflow: auto;
+}
+
 .chat-list li,
 .event-list li,
 .mini-list li {
@@ -372,7 +392,7 @@ button:disabled {
 
 .leaderboard-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -392,8 +412,12 @@ button:disabled {
 
 .suggest-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.suggest-grid > input:first-child {
+  grid-column: 1 / -1;
 }
 
 .suggest-actions {
@@ -401,6 +425,7 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 8px;
   align-items: center;
+  grid-column: 1 / -1;
 }
 
 .suggest-actions button {
@@ -761,6 +786,15 @@ button:disabled {
 
   .leaderboard-grid {
     grid-template-columns: 1fr;
+  }
+
+  .suggest-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .suggest-grid > input:first-child,
+  .suggest-actions {
+    grid-column: auto;
   }
 }
 

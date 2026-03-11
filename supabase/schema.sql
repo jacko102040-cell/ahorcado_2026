@@ -7,6 +7,7 @@ create extension if not exists pgcrypto;
 -- ===== Reset (desarrollo) =====
 drop table if exists public.room_votes cascade;
 drop table if exists public.guesses cascade;
+drop table if exists public.round_player_errors cascade;
 drop table if exists public.round_secrets cascade;
 drop table if exists public.rounds cascade;
 drop table if exists public.players cascade;
@@ -97,6 +98,7 @@ create table public.rooms (
   id uuid primary key default gen_random_uuid(),
   code text not null unique check (char_length(code) between 3 and 16),
   team_mode boolean not null default false,
+  error_mode text not null default 'shared' check (error_mode in ('shared', 'individual')),
   turn_seconds int not null default 10 check (turn_seconds between 8 and 90),
   max_errors int not null default 6 check (max_errors between 3 and 12),
   created_at timestamptz not null default now(),
@@ -177,6 +179,17 @@ create table public.guesses (
 
 create index idx_guesses_round on public.guesses(round_id);
 
+create table public.round_player_errors (
+  round_id uuid not null references public.rounds(id) on delete cascade,
+  player_id uuid not null references public.players(id) on delete cascade,
+  errors_count int not null default 0 check (errors_count >= 0),
+  exhausted_at timestamptz null,
+  primary key (round_id, player_id)
+);
+
+create index idx_round_player_errors_round on public.round_player_errors(round_id);
+create index idx_round_player_errors_player on public.round_player_errors(player_id);
+
 create table public.room_votes (
   id bigserial primary key,
   room_id uuid not null references public.rooms(id) on delete cascade,
@@ -202,7 +215,24 @@ as $$
 declare
   v_after_order int;
   v_next uuid;
+  v_round_id uuid;
+  v_round_max_errors int;
+  v_error_mode text;
 begin
+  select coalesce(error_mode, 'shared') into v_error_mode
+  from public.rooms
+  where id = p_room_id;
+
+  if v_error_mode = 'individual' then
+    select id, max_errors
+    into v_round_id, v_round_max_errors
+    from public.rounds
+    where room_id = p_room_id
+      and status = 'playing'
+    order by started_at desc
+    limit 1;
+  end if;
+
   if p_after_player_id is not null then
     select turn_order into v_after_order
     from public.players
@@ -215,6 +245,19 @@ begin
     from public.players
     where room_id = p_room_id
       and is_active = true
+      and (
+        v_error_mode <> 'individual'
+        or v_round_id is null
+        or coalesce(
+          (
+            select rpe.errors_count
+            from public.round_player_errors rpe
+            where rpe.round_id = v_round_id
+              and rpe.player_id = players.id
+          ),
+          0
+        ) < coalesce(v_round_max_errors, 6)
+      )
       and (
         turn_order > v_after_order
         or (turn_order = v_after_order and id > p_after_player_id)
@@ -229,6 +272,19 @@ begin
     where room_id = p_room_id
       and is_active = true
       and (p_after_player_id is null or id <> p_after_player_id)
+      and (
+        v_error_mode <> 'individual'
+        or v_round_id is null
+        or coalesce(
+          (
+            select rpe.errors_count
+            from public.round_player_errors rpe
+            where rpe.round_id = v_round_id
+              and rpe.player_id = players.id
+          ),
+          0
+        ) < coalesce(v_round_max_errors, 6)
+      )
     order by turn_order asc, id asc
     limit 1;
   end if;
@@ -238,6 +294,19 @@ begin
     from public.players
     where room_id = p_room_id
       and is_active = true
+      and (
+        v_error_mode <> 'individual'
+        or v_round_id is null
+        or coalesce(
+          (
+            select rpe.errors_count
+            from public.round_player_errors rpe
+            where rpe.round_id = v_round_id
+              and rpe.player_id = players.id
+          ),
+          0
+        ) < coalesce(v_round_max_errors, 6)
+      )
     order by turn_order asc, id asc
     limit 1;
   end if;
@@ -378,6 +447,15 @@ begin
   insert into public.round_secrets(round_id, word, hint)
   values (v_round_id, v_word, v_hint);
 
+  insert into public.round_player_errors(round_id, player_id, errors_count, exhausted_at)
+  select v_round_id, p.id, 0, null
+  from public.players p
+  where p.room_id = p_room_id
+    and p.is_active = true
+  on conflict (round_id, player_id) do update
+    set errors_count = excluded.errors_count,
+        exhausted_at = excluded.exhausted_at;
+
   update public.rooms
   set current_round_id = v_round_id
   where id = p_room_id;
@@ -468,6 +546,7 @@ alter table public.players enable row level security;
 alter table public.rounds enable row level security;
 alter table public.round_secrets enable row level security;
 alter table public.guesses enable row level security;
+alter table public.round_player_errors enable row level security;
 alter table public.words enable row level security;
 alter table public.room_votes enable row level security;
 
@@ -475,6 +554,7 @@ drop policy if exists rooms_select_member on public.rooms;
 drop policy if exists players_select_same_room on public.players;
 drop policy if exists rounds_select_same_room on public.rounds;
 drop policy if exists guesses_select_same_room on public.guesses;
+drop policy if exists round_player_errors_select_same_room on public.round_player_errors;
 drop policy if exists room_votes_select_same_room on public.room_votes;
 drop policy if exists deny_words_all on public.words;
 drop policy if exists deny_round_secrets_all on public.round_secrets;
@@ -532,6 +612,19 @@ using (
   )
 );
 
+create policy round_player_errors_select_same_room
+on public.round_player_errors
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from public.rounds r
+    where r.id = round_player_errors.round_id
+      and public.is_room_member(r.room_id)
+  )
+);
+
 create policy room_votes_select_same_room
 on public.room_votes
 for select
@@ -558,9 +651,11 @@ revoke insert, update, delete on public.rooms from authenticated;
 revoke insert, update, delete on public.players from authenticated;
 revoke insert, update, delete on public.rounds from authenticated;
 revoke insert, update, delete on public.guesses from authenticated;
+revoke insert, update, delete on public.round_player_errors from authenticated;
 revoke insert, update, delete on public.room_votes from authenticated;
 revoke all on public.round_secrets from authenticated;
 revoke all on public.words from authenticated;
+grant select on public.round_player_errors to authenticated;
 
 -- ===== Public RPC =====
 create or replace function public.join_room(
@@ -738,6 +833,64 @@ begin
     set team = null
     where room_id = v_room.id;
   end if;
+
+  return v_room;
+end;
+$$;
+
+create or replace function public.set_error_mode(
+  p_room_code text,
+  p_error_mode text
+)
+returns public.rooms
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_code text := public.normalize_room_code(p_room_code);
+  v_mode text := case when lower(trim(coalesce(p_error_mode, ''))) = 'individual' then 'individual' else 'shared' end;
+  v_room public.rooms%rowtype;
+  v_player public.players%rowtype;
+begin
+  if v_uid is null then
+    raise exception 'Not authenticated';
+  end if;
+
+  select r.* into v_room
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  select p.* into v_player
+  from public.rooms r
+  join public.players p on p.room_id = r.id
+  where r.code = v_code
+    and p.auth_user_id = v_uid
+    and p.is_active = true
+  limit 1;
+
+  if v_room.id is null then
+    raise exception 'Player not in room';
+  end if;
+  if not v_player.is_host then
+    raise exception 'Only host can change error mode';
+  end if;
+  if exists (
+    select 1 from public.rounds
+    where room_id = v_room.id and status = 'playing'
+  ) then
+    raise exception 'Cannot change error mode during a round';
+  end if;
+
+  update public.rooms
+  set error_mode = v_mode
+  where id = v_room.id
+  returning * into v_room;
 
   return v_room;
 end;
@@ -1045,6 +1198,7 @@ declare
   v_room public.rooms%rowtype;
   v_player public.players%rowtype;
   v_round public.rounds%rowtype;
+  v_error_mode text := 'shared';
   v_word text;
   v_hit boolean := false;
   v_new_correct text[];
@@ -1052,6 +1206,7 @@ declare
   v_new_masked text;
   v_new_errors int;
   v_next_turn uuid;
+  v_player_errors int := 0;
 begin
   if v_uid is null then
     raise exception 'Not authenticated';
@@ -1080,6 +1235,8 @@ begin
     raise exception 'Player not in room';
   end if;
 
+  v_error_mode := coalesce(v_room.error_mode, 'shared');
+
   perform public.prune_inactive_players(v_code, 75);
 
   select * into v_round
@@ -1095,6 +1252,17 @@ begin
   end if;
   if v_round.active_turn_player_id <> v_player.id then
     raise exception 'Not your turn';
+  end if;
+
+  if v_error_mode = 'individual' then
+    select coalesce(rpe.errors_count, 0) into v_player_errors
+    from public.round_player_errors rpe
+    where rpe.round_id = v_round.id
+      and rpe.player_id = v_player.id;
+
+    if v_player_errors >= v_round.max_errors then
+      raise exception 'No errors left for this round';
+    end if;
   end if;
 
   if v_letter = any(v_round.correct_letters) or v_letter = any(v_round.wrong_letters) then
@@ -1124,14 +1292,48 @@ begin
     where id = v_player.id;
   else
     v_new_wrong := array_append(v_round.wrong_letters, v_letter);
-    v_new_errors := v_round.errors_count + 1;
+    if v_error_mode = 'individual' then
+      insert into public.round_player_errors(round_id, player_id, errors_count, exhausted_at)
+      values (v_round.id, v_player.id, 1, null)
+      on conflict (round_id, player_id)
+      do update set errors_count = public.round_player_errors.errors_count + 1
+      returning errors_count into v_player_errors;
 
-    update public.rounds
-    set wrong_letters = v_new_wrong,
-        errors_count = v_new_errors,
-        status = case when v_new_errors >= max_errors then 'lost' else status end,
-        ended_at = case when v_new_errors >= max_errors then now() else ended_at end
-    where id = v_round.id;
+      update public.round_player_errors
+      set exhausted_at = case when errors_count >= v_round.max_errors and exhausted_at is null then now() else exhausted_at end
+      where round_id = v_round.id
+        and player_id = v_player.id;
+
+      update public.rounds
+      set wrong_letters = v_new_wrong,
+          errors_count = greatest(errors_count, v_player_errors)
+      where id = v_round.id;
+
+      if not exists (
+        select 1
+        from public.players p
+        left join public.round_player_errors rpe
+          on rpe.round_id = v_round.id
+         and rpe.player_id = p.id
+        where p.room_id = v_room.id
+          and p.is_active = true
+          and coalesce(rpe.errors_count, 0) < v_round.max_errors
+      ) then
+        update public.rounds
+        set status = 'lost',
+            ended_at = now()
+        where id = v_round.id;
+      end if;
+    else
+      v_new_errors := v_round.errors_count + 1;
+
+      update public.rounds
+      set wrong_letters = v_new_wrong,
+          errors_count = v_new_errors,
+          status = case when v_new_errors >= max_errors then 'lost' else status end,
+          ended_at = case when v_new_errors >= max_errors then now() else ended_at end
+      where id = v_round.id;
+    end if;
   end if;
 
   insert into public.guesses(round_id, player_id, letter, is_correct)
@@ -1149,11 +1351,16 @@ begin
       set active_turn_player_id = v_next_turn,
           turn_started_at = now()
       where id = v_round.id;
-
-      select * into v_round
-      from public.rounds
+    else
+      update public.rounds
+      set status = 'lost',
+          ended_at = now()
       where id = v_round.id;
     end if;
+
+    select * into v_round
+    from public.rounds
+    where id = v_round.id;
   end if;
 
   return v_round;
@@ -1438,6 +1645,7 @@ $$;
 grant execute on function public.join_room(text, text, text) to authenticated;
 grant execute on function public.is_room_member(uuid, uuid) to authenticated;
 grant execute on function public.set_team_mode(text, boolean) to authenticated;
+grant execute on function public.set_error_mode(text, text) to authenticated;
 grant execute on function public.start_round(text, text, text) to authenticated;
 grant execute on function public.set_ready_start(text, boolean) to authenticated;
 grant execute on function public.guess_letter(text, text) to authenticated;
@@ -1448,6 +1656,7 @@ grant execute on function public.vote_rematch(text) to authenticated;
 grant execute on function public.vote_reset_scores(text) to authenticated;
 grant execute on function public.heartbeat(text) to authenticated;
 grant execute on function public.leave_room(text) to authenticated;
+grant select on public.round_player_errors to authenticated;
 
 -- ===== Seed words =====
 insert into public.words(word, hint, category, difficulty, language)

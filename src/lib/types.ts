@@ -1,5 +1,6 @@
 export type Team = "A" | "B";
 export type Difficulty = "easy" | "medium" | "hard";
+export type ErrorMode = "shared" | "individual";
 
 export type RoomJoinResult = {
   room_id: string;
@@ -55,6 +56,7 @@ export type RoomRow = {
   id: string;
   code: string;
   team_mode: boolean;
+  error_mode: ErrorMode;
   tournament_enabled: boolean;
   tournament_best_of: 3 | 5;
   turn_seconds: number;
@@ -70,6 +72,13 @@ export type GuessRow = {
   letter: string;
   is_correct: boolean;
   created_at: string;
+};
+
+export type RoundPlayerErrorRow = {
+  round_id: string;
+  player_id: string;
+  errors_count: number;
+  exhausted_at: string | null;
 };
 
 export type GameEventRow = {

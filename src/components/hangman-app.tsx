@@ -18,11 +18,13 @@ import { getSupabaseBrowserClient } from "@/lib/supabase-client";
 import {
   type ActivateDoublePointsResult,
   type Difficulty,
+  type ErrorMode,
   type GameEventRow,
   type GuessRow,
   type LeaderboardEntry,
   type PlayerRow,
   type QuickChatRow,
+  type RoundPlayerErrorRow,
   type RoomJoinResult,
   type RoomRow,
   type RoundStatus,
@@ -157,8 +159,11 @@ function formatEventLabel(event: GameEventRow): string {
       return "gano la ronda";
     case "round_lost":
       return "ronda perdida";
-    case "chat":
-      return `chat: ${String((event.payload?.message_key as string) ?? "")}`;
+    case "chat": {
+      const key = String((event.payload?.message_key as string) ?? "");
+      const label = QUICK_CHAT_OPTIONS.find((option) => option.key === key)?.label ?? key;
+      return `chat: ${label}`;
+    }
     default:
       return event.event_type;
   }
@@ -234,6 +239,7 @@ export default function HangmanApp() {
   const [quickChats, setQuickChats] = useState<QuickChatRow[]>([]);
   const [votes, setVotes] = useState<VoteStatus>(EMPTY_VOTES);
   const [readyPlayerIds, setReadyPlayerIds] = useState<string[]>([]);
+  const [roundPlayerErrors, setRoundPlayerErrors] = useState<RoundPlayerErrorRow[]>([]);
   const [roundOutcomeFx, setRoundOutcomeFx] = useState<RoundOutcomeFx>(null);
   const [tournamentRounds, setTournamentRounds] = useState<Array<{ id: string; winner_player_id: string | null }>>([]);
   const [settings, setSettings] = useState<UserSettings>(DEFAULT_SETTINGS);
@@ -268,6 +274,7 @@ export default function HangmanApp() {
   const [isActivatingDouble, setIsActivatingDouble] = useState(false);
   const [isTogglingBlockVowels, setIsTogglingBlockVowels] = useState(false);
   const [isUpdatingTournament, setIsUpdatingTournament] = useState(false);
+  const [isUpdatingErrorMode, setIsUpdatingErrorMode] = useState(false);
   const [busyLetter, setBusyLetter] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [loadingRoom, setLoadingRoom] = useState(false);
@@ -338,11 +345,14 @@ export default function HangmanApp() {
       if (!supabase) return;
 
       const extendedRoomSelect =
-        "id,code,team_mode,tournament_enabled,tournament_best_of,turn_seconds,max_errors,created_at,current_round_id";
+        "id,code,team_mode,error_mode,tournament_enabled,tournament_best_of,turn_seconds,max_errors,created_at,current_round_id";
       const basicRoomSelect = "id,code,team_mode,turn_seconds,max_errors,created_at,current_round_id";
       let { data, error } = await supabase.from("rooms").select(extendedRoomSelect).eq("id", roomId).limit(1);
 
-      if (error && error.message.toLowerCase().includes("tournament_")) {
+      if (
+        error &&
+        (error.message.toLowerCase().includes("tournament_") || error.message.toLowerCase().includes("error_mode"))
+      ) {
         const fallback = await supabase.from("rooms").select(basicRoomSelect).eq("id", roomId).limit(1);
         data = fallback.data as unknown as typeof data;
         error = fallback.error;
@@ -360,6 +370,7 @@ export default function HangmanApp() {
       }
       setRoom({
         ...row,
+        error_mode: (row.error_mode as ErrorMode | undefined) ?? "shared",
         tournament_enabled: row.tournament_enabled ?? false,
         tournament_best_of: row.tournament_best_of ?? 3
       });
@@ -464,6 +475,28 @@ export default function HangmanApp() {
     [loadGuesses, supabase]
   );
 
+  const loadRoundPlayerErrors = useCallback(
+    async (roundId: string | null) => {
+      if (!supabase || !roundId) {
+        setRoundPlayerErrors([]);
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("round_player_errors")
+        .select("round_id,player_id,errors_count,exhausted_at")
+        .eq("round_id", roundId);
+
+      if (error) {
+        setRoundPlayerErrors([]);
+        return;
+      }
+
+      setRoundPlayerErrors((data ?? []) as RoundPlayerErrorRow[]);
+    },
+    [supabase]
+  );
+
   const loadVotes = useCallback(
     async (roomCodeValue: string) => {
       if (!supabase) return;
@@ -561,6 +594,7 @@ export default function HangmanApp() {
         payload.room
           ? {
               ...payload.room,
+              error_mode: (payload.room.error_mode as ErrorMode | undefined) ?? "shared",
               tournament_enabled: payload.room.tournament_enabled ?? false,
               tournament_best_of: payload.room.tournament_best_of ?? 3
             }
@@ -579,6 +613,9 @@ export default function HangmanApp() {
       );
       setGuesses(payload.guesses ?? []);
       setVotes(payload.votes ?? EMPTY_VOTES);
+      if (Array.isArray((payload as { round_player_errors?: unknown }).round_player_errors)) {
+        setRoundPlayerErrors(((payload as { round_player_errors?: unknown }).round_player_errors ?? []) as RoundPlayerErrorRow[]);
+      }
       setEvents(payload.events ?? []);
       setQuickChats(payload.quick_chats ?? []);
       setProfilesByUser(
@@ -639,14 +676,10 @@ export default function HangmanApp() {
               loadRoom(target.roomId),
               loadPlayers(target.roomId),
               loadRound(target.roomId),
-              loadTournamentRounds(target.roomId),
-              loadVotes(target.roomCode)
+              loadTournamentRounds(target.roomId)
             ]);
-            await loadReadyPlayers(target.roomId);
-          } else {
-            await loadReadyPlayers(target.roomId);
           }
-          await loadLeaderboards();
+          await Promise.all([loadReadyPlayers(target.roomId), loadVotes(target.roomCode), loadLeaderboards()]);
         } while (refreshQueuedRef.current);
       } finally {
         refreshInFlightRef.current = false;
@@ -786,6 +819,7 @@ export default function HangmanApp() {
     setRound(null);
     setTournamentRounds([]);
     setGuesses([]);
+    setRoundPlayerErrors([]);
     setEvents([]);
     setQuickChats([]);
     setReadyPlayerIds([]);
@@ -925,6 +959,27 @@ export default function HangmanApp() {
       }
     },
     [joinState, loadPlayers, loadRoom, supabase]
+  );
+
+  const setErrorMode = useCallback(
+    async (mode: ErrorMode) => {
+      if (!supabase || !joinState) return;
+      setIsUpdatingErrorMode(true);
+      setActionError(null);
+      try {
+        const { error } = await supabase.rpc("set_error_mode", {
+          p_room_code: joinState.roomCode,
+          p_error_mode: mode
+        });
+        if (error) throw new Error(error.message);
+        await loadRoom(joinState.roomId);
+      } catch (error) {
+        setActionError(toFriendlyPowerupError(error, "No se pudo cambiar modo de errores."));
+      } finally {
+        setIsUpdatingErrorMode(false);
+      }
+    },
+    [joinState, loadRoom, supabase]
   );
 
   const setReadyStatus = useCallback(
@@ -1206,7 +1261,11 @@ export default function HangmanApp() {
   }, [joinState, loadRoomState, refreshJoinedState]);
 
   useEffect(() => {
-    if (!joinState || !round || round.status !== "playing" || round.active_turn_player_id !== joinState.playerId) return;
+    const isExhaustedForTurn =
+      room?.error_mode === "individual" &&
+      roundPlayerErrors.some((entry) => entry.player_id === joinState?.playerId && entry.errors_count >= (round?.max_errors ?? 0));
+
+    if (!joinState || !round || round.status !== "playing" || round.active_turn_player_id !== joinState.playerId || isExhaustedForTurn) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
       const key = event.key.toUpperCase();
@@ -1218,13 +1277,17 @@ export default function HangmanApp() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [guessLetter, joinState, round]);
+  }, [guessLetter, joinState, room?.error_mode, round, roundPlayerErrors]);
 
   useEffect(() => {
     if (!round || round.status !== "playing") return;
     const interval = window.setInterval(() => setTurnTick(Date.now()), TURN_TICK_MS);
     return () => window.clearInterval(interval);
   }, [round]);
+
+  useEffect(() => {
+    void loadRoundPlayerErrors(round?.id ?? null);
+  }, [loadRoundPlayerErrors, round?.id]);
 
   useEffect(() => {
     if (!round) {
@@ -1280,8 +1343,22 @@ export default function HangmanApp() {
   const allPlayersReady = useMemo(() => players.length > 0 && readyCount === players.length, [players.length, readyCount]);
   const meReady = useMemo(() => Boolean(me && readySet.has(me.id)), [me, readySet]);
 
+  const errorMode: ErrorMode = room?.error_mode ?? "shared";
+  const roundErrorsByPlayer = useMemo(() => {
+    return roundPlayerErrors.reduce<Record<string, number>>((acc, row) => {
+      acc[row.player_id] = row.errors_count;
+      return acc;
+    }, {});
+  }, [roundPlayerErrors]);
+  const meRoundErrors = me ? roundErrorsByPlayer[me.id] ?? 0 : 0;
+  const currentTurnErrors = currentTurnPlayer ? roundErrorsByPlayer[currentTurnPlayer.id] ?? 0 : 0;
+  const effectiveErrors = errorMode === "individual" ? currentTurnErrors : round?.errors_count ?? 0;
+  const isRoundPlaying = round?.status === "playing";
+  const isLobbyPhase = !round || round.status !== "playing";
+  const meIsExhausted = Boolean(round && me && errorMode === "individual" && meRoundErrors >= round.max_errors);
+
   const isMyTurn = Boolean(me && round?.status === "playing" && round.active_turn_player_id === me.id);
-  const canStartRound = Boolean(me?.is_host && (!round || round.status !== "playing") && allPlayersReady);
+  const canStartRound = Boolean(me?.is_host && isLobbyPhase && allPlayersReady);
   const canActivateDouble = Boolean(
     isMyTurn &&
       round?.status === "playing" &&
@@ -1531,11 +1608,94 @@ export default function HangmanApp() {
 
           <div className="layout-grid">
             <section className="card board">
-              <h2>Ronda actual</h2>
+              <h2>{isLobbyPhase ? "Lobby pre-juego" : "Ronda actual"}</h2>
               {loadingRoom ? <p className="muted">Cargando sala...</p> : null}
 
-              {!round ? (
-                <p className="muted">Todavia no hay ronda activa.</p>
+              {isLobbyPhase ? (
+                <>
+                  <p className="muted">
+                    Configuren la sala, marquen <strong>Ready</strong> y el host inicia cuando todos esten listos.
+                  </p>
+                  {round ? (
+                    <p className="status">
+                      {round.status === "won" ? `Ultima ronda ganada por ${winnerName ?? "alguien"}.` : "Ultima ronda perdida."}
+                    </p>
+                  ) : null}
+                  {round ? <MaskedWordDisplay word={round.masked_word} /> : null}
+
+                  <section className="lobby-controls">
+                    <h3>Configuracion de partida</h3>
+                    <div className="control-row">
+                      <input
+                        type="text"
+                        placeholder="Categoria (opcional)"
+                        value={categoryFilter}
+                        onChange={(event) => setCategoryFilter(event.target.value)}
+                        disabled={!me?.is_host || isStartingRound}
+                      />
+                      <select
+                        value={difficultyFilter}
+                        onChange={(event) => setDifficultyFilter(toDifficulty(event.target.value) ?? "")}
+                        disabled={!me?.is_host || isStartingRound}
+                      >
+                        <option value="">Dificultad: cualquiera</option>
+                        <option value="easy">easy</option>
+                        <option value="medium">medium</option>
+                        <option value="hard">hard</option>
+                      </select>
+                    </div>
+                    <div className="control-row">
+                      <select
+                        value={errorMode}
+                        onChange={(event) => void setErrorMode(event.target.value as ErrorMode)}
+                        disabled={!me?.is_host || isUpdatingErrorMode}
+                      >
+                        <option value="shared">Errores conjuntos</option>
+                        <option value="individual">Errores individuales</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void setTeamMode(!room?.team_mode)}
+                        disabled={isChangingTeamMode || !me?.is_host}
+                      >
+                        {isChangingTeamMode
+                          ? "Actualizando..."
+                          : room?.team_mode
+                            ? "Desactivar equipos"
+                            : "Activar equipos"}
+                      </button>
+                    </div>
+                  </section>
+
+                  <section className="ready-panel">
+                    <p>
+                      Estado Ready: <strong>{readyCount}</strong> / {players.length}
+                    </p>
+                    <div className="control-row">
+                      <button
+                        type="button"
+                        onClick={() => void setReadyStatus(!meReady)}
+                        disabled={isSettingReady}
+                      >
+                        {isSettingReady ? "Actualizando..." : meReady ? "Quitar Ready" : "Estoy Ready"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void startRound()}
+                        disabled={!canStartRound || isStartingRound}
+                      >
+                        {isStartingRound
+                          ? "Iniciando..."
+                          : me?.is_host
+                            ? allPlayersReady
+                              ? "Iniciar ronda (Host)"
+                              : "Esperando Ready de todos"
+                            : "Solo el host inicia"}
+                      </button>
+                    </div>
+                  </section>
+                </>
               ) : (
                 <>
                   {roundOutcomeFx ? (
@@ -1554,15 +1714,20 @@ export default function HangmanApp() {
                   <p className="status">
                     {round.status === "playing" && "Adivina la palabra por turnos"}
                     {round.status === "won" && `Ronda terminada. Gano ${winnerName ?? "alguien"}.`}
-                    {round.status === "lost" && "Ronda terminada. Se agotaron los errores."}
+                    {round.status === "lost" &&
+                      (errorMode === "individual"
+                        ? "Ronda terminada. Todos agotaron sus errores."
+                        : "Ronda terminada. Se agotaron los errores.")}
                   </p>
 
                   <div className="round-stage">
                     <div className="hangman-column">
-                      <HangmanFigure errors={round.errors_count} maxErrors={round.max_errors} status={round.status} />
+                      <HangmanFigure errors={effectiveErrors} maxErrors={round.max_errors} status={round.status} />
                       <section className="keyboard keyboard-inline">
                         <h3>Teclado</h3>
-                        <p className="muted">{isMyTurn ? "Es tu turno" : "Espera tu turno para jugar una letra"}</p>
+                        <p className="muted">
+                          {isMyTurn ? (meIsExhausted ? "Sin errores disponibles en esta ronda" : "Es tu turno") : "Espera tu turno"}
+                        </p>
                         <div className={`keys theme-${settings.keyboardTheme}`}>
                           {ALPHABET.map((letter) => {
                             const alreadyUsed = guessedLetters.has(letter);
@@ -1574,7 +1739,8 @@ export default function HangmanApp() {
                               alreadyUsed ||
                               Boolean(busyLetter) ||
                               isSkippingTurn ||
-                              blockedByVowel;
+                              blockedByVowel ||
+                              meIsExhausted;
 
                             return (
                               <button
@@ -1599,11 +1765,27 @@ export default function HangmanApp() {
                         Dificultad: <strong>{round.difficulty}</strong>
                       </p>
                       <p>
+                        Modo errores: <strong>{errorMode === "individual" ? "individual" : "conjunto"}</strong>
+                      </p>
+                      <p>
                         Vocales: <strong>{round.block_vowels ? "bloqueadas" : "libres"}</strong>
                       </p>
+                      {errorMode === "individual" ? (
+                        <>
+                          <p>
+                            Errores de turno: <strong>{currentTurnErrors}</strong> / {round.max_errors}
+                          </p>
+                          <p>
+                            Tus errores: <strong>{meRoundErrors}</strong> / {round.max_errors}
+                          </p>
+                        </>
+                      ) : null}
                       <p>
                         Letras falladas:{" "}
                         <strong>{round.wrong_letters.length ? round.wrong_letters.join(", ") : "-"}</strong>
+                      </p>
+                      <p>
+                        Jugadas registradas: <strong>{guesses.length}</strong>
                       </p>
                     </div>
                   </div>
@@ -1619,147 +1801,66 @@ export default function HangmanApp() {
                       Pista: <strong>{round.hint_text}</strong>
                     </p>
                   ) : null}
-
-                  <section className="timeline">
-                    <h3>Timeline</h3>
-                    {guesses.length === 0 ? (
-                      <p className="muted">Sin jugadas todavia.</p>
-                    ) : (
-                      <ul>
-                        {guesses.map((guess) => (
-                          <li key={guess.id} className={guess.is_correct ? "hit" : "miss"}>
-                            <span className="timeline-icon">{guess.is_correct ? "OK" : "X"}</span>
-                            <span>
-                              <strong>{playerNameById.get(guess.player_id) ?? "Jugador"}</strong>{" "}
-                              {guess.is_correct ? "acerto" : "fallo"} la letra <strong>{guess.letter}</strong>
-                            </span>
-                            <time dateTime={guess.created_at}>
-                              {new Date(guess.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                            </time>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                  </section>
                 </>
               )}
 
-              <div className="round-actions">
-                <div className="control-row">
-                  <input
-                    type="text"
-                    placeholder="Categoria (opcional)"
-                    value={categoryFilter}
-                    onChange={(event) => setCategoryFilter(event.target.value)}
-                    disabled={!me?.is_host || round?.status === "playing"}
-                  />
-                  <select
-                    value={difficultyFilter}
-                    onChange={(event) => setDifficultyFilter(toDifficulty(event.target.value) ?? "")}
-                    disabled={!me?.is_host || round?.status === "playing"}
-                  >
-                    <option value="">Dificultad: cualquiera</option>
-                    <option value="easy">easy</option>
-                    <option value="medium">medium</option>
-                    <option value="hard">hard</option>
-                  </select>
-                </div>
-
-                <section className="ready-panel">
-                  <p>
-                    Estado Ready: <strong>{readyCount}</strong> / {players.length}
-                  </p>
+              {isRoundPlaying ? (
+                <div className="round-actions">
                   <div className="control-row">
                     <button
                       type="button"
-                      onClick={() => void setReadyStatus(!meReady)}
-                      disabled={isSettingReady || round?.status === "playing"}
+                      onClick={() => void requestHint()}
+                      disabled={!isMyTurn || Boolean(round?.hint_used) || isUsingHint || round?.status !== "playing"}
                     >
-                      {isSettingReady ? "Actualizando..." : meReady ? "Quitar Ready" : "Estoy Ready"}
+                      {isUsingHint ? "Usando pista..." : "Usar pista (-5)"}
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => void startRound()}
-                      disabled={!canStartRound || isStartingRound}
-                    >
-                      {isStartingRound
-                        ? "Iniciando..."
-                        : round?.status === "playing"
-                          ? "Ronda en curso"
-                          : me?.is_host
-                            ? allPlayersReady
-                              ? "Iniciar ronda (Host)"
-                              : "Esperando Ready de todos"
-                            : "Solo el host inicia"}
-                    </button>
-                  </div>
-                </section>
-
-                <div className="control-row">
-                  <button
-                    type="button"
-                    onClick={() => void requestHint()}
-                    disabled={!isMyTurn || Boolean(round?.hint_used) || isUsingHint || round?.status !== "playing"}
-                  >
-                    {isUsingHint ? "Usando pista..." : "Usar pista (-5)"}
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void advanceTurn(false)}
-                    disabled={!round || round.status !== "playing" || isSkippingTurn}
-                  >
-                    {isSkippingTurn ? "Pasando..." : "Pasar turno"}
-                  </button>
-                </div>
-
-                <section className="powerups">
-                  <h3>Power-ups</h3>
-                  <p className="muted">
-                    {round?.double_points_player_id
-                      ? `Doble puntaje activo: ${playerNameById.get(round.double_points_player_id) ?? "Jugador"}`
-                      : "Doble puntaje disponible"}
-                  </p>
-                  {round?.block_vowels ? <p className="muted">Bloqueo de vocales: activo</p> : null}
-                  <div className="control-row">
-                    <button type="button" onClick={() => void activateDoublePoints()} disabled={!canActivateDouble || isActivatingDouble}>
-                      {isActivatingDouble ? "Activando..." : "Doble puntaje x1 turno"}
-                    </button>
-                    <button type="button" onClick={() => void voteFreeHint()} disabled={isVotingHint || round?.status !== "playing"}>
-                      {isVotingHint ? "Votando..." : "Votar pista gratis"}
-                    </button>
-                  </div>
-                  {me?.is_host ? (
                     <button
                       type="button"
                       className="secondary"
-                      onClick={() => void setBlockVowels(!round?.block_vowels)}
-                      disabled={isTogglingBlockVowels || round?.status !== "playing"}
+                      onClick={() => void advanceTurn(false)}
+                      disabled={!round || round.status !== "playing" || isSkippingTurn}
                     >
-                      {isTogglingBlockVowels
-                        ? "Actualizando..."
-                        : round?.block_vowels
-                          ? "Desactivar bloqueo vocales"
-                          : "Activar bloqueo vocales"}
+                      {isSkippingTurn ? "Pasando..." : "Pasar turno"}
                     </button>
-                  ) : null}
-                </section>
+                  </div>
 
-                {me?.is_host ? (
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={() => void setTeamMode(!room?.team_mode)}
-                    disabled={isChangingTeamMode || round?.status === "playing"}
-                  >
-                    {isChangingTeamMode
-                      ? "Actualizando..."
-                      : room?.team_mode
-                        ? "Desactivar equipos"
-                        : "Activar equipos"}
-                  </button>
-                ) : null}
-              </div>
+                  <section className="powerups">
+                    <h3>Power-ups</h3>
+                    <p className="muted">
+                      {round?.double_points_player_id
+                        ? `Doble puntaje activo: ${playerNameById.get(round.double_points_player_id) ?? "Jugador"}`
+                        : "Doble puntaje disponible"}
+                    </p>
+                    {round?.block_vowels ? <p className="muted">Bloqueo de vocales: activo</p> : null}
+                    <div className="control-row">
+                      <button
+                        type="button"
+                        onClick={() => void activateDoublePoints()}
+                        disabled={!canActivateDouble || isActivatingDouble}
+                      >
+                        {isActivatingDouble ? "Activando..." : "Doble puntaje x1 turno"}
+                      </button>
+                      <button type="button" onClick={() => void voteFreeHint()} disabled={isVotingHint || round?.status !== "playing"}>
+                        {isVotingHint ? "Votando..." : "Votar pista gratis"}
+                      </button>
+                    </div>
+                    {me?.is_host ? (
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => void setBlockVowels(!round?.block_vowels)}
+                        disabled={isTogglingBlockVowels || round?.status !== "playing"}
+                      >
+                        {isTogglingBlockVowels
+                          ? "Actualizando..."
+                          : round?.block_vowels
+                            ? "Desactivar bloqueo vocales"
+                            : "Activar bloqueo vocales"}
+                      </button>
+                    ) : null}
+                  </section>
+                </div>
+              ) : null}
             </section>
 
             <section className="card scoreboard">
@@ -1779,6 +1880,7 @@ export default function HangmanApp() {
                         {index + 1}. {player.display_name} {player.team ? `[${player.team}]` : ""}{" "}
                         {player.is_host ? "(Host)" : ""} {round?.active_turn_player_id === player.id ? "-> turno" : ""}
                         {readySet.has(player.id) ? " | READY" : " | NO READY"}
+                        {errorMode === "individual" ? ` | E ${roundErrorsByPlayer[player.id] ?? 0}/${round?.max_errors ?? room?.max_errors ?? 6}` : ""}
                         {profilesByUser[player.auth_user_id] ? (
                           <>
                             {" "}
@@ -1888,111 +1990,112 @@ export default function HangmanApp() {
                     {isSendingChat ? "Enviando..." : "Enviar"}
                   </button>
                 </div>
-                <ul className="chat-list">
-                  {quickChats.slice(0, 6).map((chat) => (
-                    <li key={chat.id}>
-                      <strong>{playerNameById.get(chat.player_id) ?? "Jugador"}:</strong>{" "}
-                      {QUICK_CHAT_OPTIONS.find((option) => option.key === chat.message_key)?.label ?? chat.message_key}
-                    </li>
-                  ))}
-                </ul>
+                <p className="muted">Mensajes recientes: {quickChats.length}</p>
               </section>
 
               <section className="social-panel">
-                <h3>Feed de sistema</h3>
-                <ul className="event-list">
-                  {events.slice(0, 8).map((event) => (
-                    <li key={event.id}>
-                      <strong>{event.actor_player_id ? (playerNameById.get(event.actor_player_id) ?? "Jugador") : "Sistema"}</strong>{" "}
-                      {formatEventLabel(event)}
-                    </li>
-                  ))}
-                </ul>
+                <h3>Actividad de sala</h3>
+                {events.length === 0 ? (
+                  <p className="muted">Sin actividad por ahora.</p>
+                ) : (
+                  <ul className="event-list">
+                    {events.slice(0, 14).map((event) => (
+                      <li key={event.id}>
+                        <strong>{event.actor_player_id ? (playerNameById.get(event.actor_player_id) ?? "Jugador") : "Sistema"}</strong>{" "}
+                        {formatEventLabel(event)}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </section>
 
-              <section className="social-panel">
-                <h3>Leaderboards</h3>
-                <div className="leaderboard-grid">
-                  <div className="leaderboard-block">
-                    <p className="muted">Global ELO</p>
-                    <ul className="mini-list">
-                      {leaderboards.global.slice(0, 5).map((entry) => (
-                        <li key={`global-${entry.auth_user_id}`}>
-                          <span>{entry.display_name}</span>
-                          <strong>{entry.value}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="leaderboard-block">
-                    <p className="muted">Semanal</p>
-                    <ul className="mini-list">
-                      {leaderboards.weekly.slice(0, 5).map((entry) => (
-                        <li key={`weekly-${entry.auth_user_id}`}>
-                          <span>{entry.display_name}</span>
-                          <strong>{entry.value}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="leaderboard-block">
-                    <p className="muted">Mensual</p>
-                    <ul className="mini-list">
-                      {leaderboards.monthly.slice(0, 5).map((entry) => (
-                        <li key={`monthly-${entry.auth_user_id}`}>
-                          <span>{entry.display_name}</span>
-                          <strong>{entry.value}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                  <div className="leaderboard-block">
-                    <p className="muted">Temporada</p>
-                    <ul className="mini-list">
-                      {leaderboards.season.slice(0, 5).map((entry) => (
-                        <li key={`season-${entry.auth_user_id}`}>
-                          <span>{entry.display_name}</span>
-                          <strong>{entry.value}</strong>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                </div>
-              </section>
+              {isLobbyPhase ? (
+                <>
+                  <section className="social-panel">
+                    <h3>Leaderboards</h3>
+                    <div className="leaderboard-grid">
+                      <div className="leaderboard-block">
+                        <p className="muted">Global ELO</p>
+                        <ul className="mini-list">
+                          {leaderboards.global.slice(0, 5).map((entry) => (
+                            <li key={`global-${entry.auth_user_id}`}>
+                              <span>{entry.display_name}</span>
+                              <strong>{entry.value}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="leaderboard-block">
+                        <p className="muted">Semanal</p>
+                        <ul className="mini-list">
+                          {leaderboards.weekly.slice(0, 5).map((entry) => (
+                            <li key={`weekly-${entry.auth_user_id}`}>
+                              <span>{entry.display_name}</span>
+                              <strong>{entry.value}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="leaderboard-block">
+                        <p className="muted">Mensual</p>
+                        <ul className="mini-list">
+                          {leaderboards.monthly.slice(0, 5).map((entry) => (
+                            <li key={`monthly-${entry.auth_user_id}`}>
+                              <span>{entry.display_name}</span>
+                              <strong>{entry.value}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                      <div className="leaderboard-block">
+                        <p className="muted">Temporada</p>
+                        <ul className="mini-list">
+                          {leaderboards.season.slice(0, 5).map((entry) => (
+                            <li key={`season-${entry.auth_user_id}`}>
+                              <span>{entry.display_name}</span>
+                              <strong>{entry.value}</strong>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    </div>
+                  </section>
 
-              <section className="social-panel">
-                <h3>Sugerir palabra</h3>
-                <div className="suggest-grid">
-                  <input
-                    type="text"
-                    placeholder="PALABRA"
-                    value={wordSuggestion}
-                    onChange={(event) => setWordSuggestion(event.target.value.toUpperCase())}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Pista"
-                    value={wordHint}
-                    onChange={(event) => setWordHint(event.target.value)}
-                  />
-                  <input
-                    type="text"
-                    placeholder="Categoria"
-                    value={wordCategory}
-                    onChange={(event) => setWordCategory(event.target.value.toLowerCase())}
-                  />
-                  <div className="suggest-actions">
-                    <select value={wordDifficulty} onChange={(event) => setWordDifficulty(event.target.value as Difficulty)}>
-                      <option value="easy">easy</option>
-                      <option value="medium">medium</option>
-                      <option value="hard">hard</option>
-                    </select>
-                    <button type="button" onClick={() => void submitWordSuggestion()} disabled={isSubmittingWord}>
-                      {isSubmittingWord ? "Enviando..." : "Enviar"}
-                    </button>
-                  </div>
-                </div>
-              </section>
+                  <section className="social-panel">
+                    <h3>Sugerir palabra</h3>
+                    <div className="suggest-grid">
+                      <input
+                        type="text"
+                        placeholder="PALABRA"
+                        value={wordSuggestion}
+                        onChange={(event) => setWordSuggestion(event.target.value.toUpperCase())}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Pista"
+                        value={wordHint}
+                        onChange={(event) => setWordHint(event.target.value)}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Categoria"
+                        value={wordCategory}
+                        onChange={(event) => setWordCategory(event.target.value.toLowerCase())}
+                      />
+                      <div className="suggest-actions">
+                        <select value={wordDifficulty} onChange={(event) => setWordDifficulty(event.target.value as Difficulty)}>
+                          <option value="easy">easy</option>
+                          <option value="medium">medium</option>
+                          <option value="hard">hard</option>
+                        </select>
+                        <button type="button" onClick={() => void submitWordSuggestion()} disabled={isSubmittingWord}>
+                          {isSubmittingWord ? "Enviando..." : "Enviar"}
+                        </button>
+                      </div>
+                    </div>
+                  </section>
+                </>
+              ) : null}
             </section>
           </div>
 
